@@ -64,32 +64,42 @@ python patch.py --check
 
 这个模式会扫描本机插件并输出状态，但不会真正修改任何文件。
 
-### 2. 自动检测并修复
+### 2. 无参数时仅显示帮助
 
 ```bash
 python patch.py
 ```
 
-脚本会：
+为了避免误修改文件，脚本在不带任何模式参数时只会输出帮助信息，不会执行修复。
+如果传了 `--extensions-dir` 等参数但没有同时指定 `--apply`、`--check` 或 `--rollback`，脚本会直接报错，避免把无效命令当成成功执行。
+
+### 3. 显式检测并修复
+
+```bash
+python patch.py --apply
+```
+
+### 4. 指定自定义扩展目录
+如果你想在指定目录上执行修复，需要显式传入 `--apply`：
+
+```bash
+python patch.py --apply --extensions-dir "/path/to/extensions"
+```
+
+如果有多个目录，也可以重复传入：
+
+```bash
+python patch.py --apply --extensions-dir "/path/a" --extensions-dir "/path/b"
+```
+
+修复模式会：
 
 1. 扫描所有 Claude Code 插件目录
 2. 找出仍包含 `$.text.trim()` 的版本
 3. 自动替换为 `($.text || "").trim()`
 4. 在原文件旁边生成备份文件
 
-### 3. 指定自定义扩展目录
-
-```bash
-python patch.py --extensions-dir "/path/to/extensions"
-```
-
-如果有多个目录，也可以重复传入：
-
-```bash
-python patch.py --extensions-dir "/path/a" --extensions-dir "/path/b"
-```
-
-### 4. 自动回滚到修复前版本
+### 5. 自动回滚到修复前版本
 
 ```bash
 python patch.py --rollback

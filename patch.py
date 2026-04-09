@@ -15,6 +15,11 @@ INDEX_JS_RELATIVE_PATH = Path("webview") / "index.js"
 BROKEN_EXPR = "$.text.trim()"
 FIXED_EXPR = '($.text || "").trim()'
 BACKUP_SUFFIX = ".claude-code-trim.bak"
+SYMBOL_INFO = "[*]"
+SYMBOL_OK = "[+]"
+SYMBOL_WARN = "[!]"
+SYMBOL_ITEM = "[-]"
+SYMBOL_SUMMARY = "[=]"
 
 
 @dataclass(frozen=True)
@@ -52,7 +57,7 @@ class ScanResult:
         return "正常"
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "检测并修复 Claude Code VS Code 插件中由于不安全的 "
@@ -60,6 +65,11 @@ def parse_args() -> argparse.Namespace:
         )
     )
     mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--apply",
+        action="store_true",
+        help="检测并修复问题。这个模式会修改文件。",
+    )
     mode_group.add_argument(
         "--check",
         action="store_true",
@@ -80,6 +90,10 @@ def parse_args() -> argparse.Namespace:
             "如果不传，则使用当前平台的默认 VS Code 扩展目录。"
         ),
     )
+    return parser
+
+
+def parse_args(parser: argparse.ArgumentParser) -> argparse.Namespace:
     return parser.parse_args()
 
 
@@ -228,66 +242,111 @@ def patch_candidate(result: ScanResult) -> tuple[int, Path]:
 
 def print_scan_report(results: list[ScanResult]) -> None:
     for result in results:
-        print(f"[{result.status_label}] {result.candidate.name}")
-        print(f"  扩展根目录: {result.candidate.root}")
-        print(f"  目标文件: {result.candidate.index_js}")
+        symbol = SYMBOL_WARN if result.needs_patch else SYMBOL_OK
+        print(f"{symbol} {result.status_label}: {result.candidate.name}")
+        print(f"  路径: {result.candidate.index_js}")
         print(f"  坏表达式数量: {result.broken_count}")
         print(f"  已修复表达式数量: {result.fixed_count}")
         print(f"  备份文件: {'有' if result.backup_exists else '无'}")
 
 
+def print_check_report(results: list[ScanResult]) -> None:
+    needs_patch = [result for result in results if result.needs_patch]
+    already_patched = [result for result in results if result.already_patched]
+    normal = [
+        result for result in results if not result.needs_patch and not result.already_patched
+    ]
+
+    print(f"\n{SYMBOL_SUMMARY} 检查摘要")
+    print(f"  {SYMBOL_ITEM} 安装目录总数: {len(results)}")
+    print(f"  {SYMBOL_WARN} 需要修复: {len(needs_patch)}")
+    print(f"  {SYMBOL_OK} 已修复: {len(already_patched)}")
+    print(f"  {SYMBOL_INFO} 正常: {len(normal)}")
+
+    sections = [
+        (f"{SYMBOL_WARN} 需要修复", needs_patch),
+        (f"{SYMBOL_OK} 已修复", already_patched),
+        (f"{SYMBOL_INFO} 正常", normal),
+    ]
+
+    for section_name, section_results in sections:
+        if not section_results:
+            continue
+
+        print(f"\n{section_name} ({len(section_results)})")
+        for result in section_results:
+            detail = (
+                f"坏表达式 {result.broken_count} 处，"
+                f"已修复表达式 {result.fixed_count} 处，"
+                f"备份 {'有' if result.backup_exists else '无'}"
+            )
+            print(f"{SYMBOL_ITEM} {result.candidate.name}")
+            print(f"  文件: {result.candidate.index_js}")
+            print(f"  详情: {detail}")
+
+
 def main() -> int:
-    args = parse_args()
+    parser = build_parser()
+    args = parse_args(parser)
+    if not (args.apply or args.check or args.rollback):
+        if len(sys.argv) > 1:
+            parser.error("传入参数时必须同时指定 --apply、--check 或 --rollback。")
+        parser.print_help()
+        print(f"\n{SYMBOL_INFO} 提示: 使用 --apply 才会实际修复文件。")
+        return 0
+
     roots = (
         dedupe_paths(Path(path) for path in args.extensions_dir)
         if args.extensions_dir
         else default_extension_roots()
     )
 
-    print("正在扫描以下扩展目录:")
+    print(f"{SYMBOL_INFO} 正在扫描以下扩展目录:")
     for root in roots:
-        print(f"  - {root}")
+        print(f"  {SYMBOL_ITEM} {root}")
 
     candidates = discover_extensions(roots)
     if not candidates:
-        print("未找到 Claude Code VS Code 插件。")
+        print(f"{SYMBOL_WARN} 未找到 Claude Code VS Code 插件。")
         if args.extensions_dir:
-            print("提示: 如果插件安装在其他位置，请传入正确的 --extensions-dir。")
+            print(f"{SYMBOL_INFO} 提示: 如果插件安装在其他位置，请传入正确的 --extensions-dir。")
         return 1
 
     results = [scan_candidate(candidate) for candidate in candidates]
-    print(f"\n共发现 {len(results)} 个 Claude Code 插件安装目录。\n")
+    to_patch = [result for result in results if result.needs_patch]
+
+    if args.check:
+        print_check_report(results)
+        print()
+        if to_patch:
+            print(f"{SYMBOL_WARN} 检测到 {len(to_patch)} 个安装目录仍需修复。")
+            return 2
+        print(f"{SYMBOL_OK} 未发现需要修复的问题。")
+        return 0
+
+    print(f"\n{SYMBOL_SUMMARY} 共发现 {len(results)} 个 Claude Code 插件安装目录。\n")
     print_scan_report(results)
 
     if args.rollback:
         to_rollback = [result for result in results if result.backup_exists]
         print()
         if not to_rollback:
-            print("未找到可用于回滚的备份文件。")
+            print(f"{SYMBOL_WARN} 未找到可用于回滚的备份文件。")
             return 0
 
         rolled_back_files = 0
         for result in to_rollback:
             backup_path = rollback_candidate(result.candidate)
             rolled_back_files += 1
-            print(f"已回滚 {result.candidate.name}")
+            print(f"{SYMBOL_OK} 已回滚 {result.candidate.name}")
             print(f"  恢复来源: {backup_path}")
             print(f"  已恢复到: {result.candidate.index_js}")
 
-        print(f"\n处理完成，共回滚 {rolled_back_files} 个文件。")
-        return 0
-
-    to_patch = [result for result in results if result.needs_patch]
-    if args.check:
-        print()
-        if to_patch:
-            print(f"检测到 {len(to_patch)} 个安装目录仍需修复。")
-            return 2
-        print("未发现需要修复的问题。")
+        print(f"\n{SYMBOL_OK} 处理完成，共回滚 {rolled_back_files} 个文件。")
         return 0
 
     if not to_patch:
-        print("\n未发现需要修复的问题。")
+        print(f"\n{SYMBOL_OK} 未发现需要修复的问题。")
         return 0
 
     print()
@@ -295,11 +354,11 @@ def main() -> int:
     for result in to_patch:
         replaced, backup_path = patch_candidate(result)
         patched_files += 1
-        print(f"已修复 {result.candidate.name}")
+        print(f"{SYMBOL_OK} 已修复 {result.candidate.name}")
         print(f"  替换次数: {replaced}")
         print(f"  备份文件: {backup_path}")
 
-    print(f"\n处理完成，共修复 {patched_files} 个文件。")
+    print(f"\n{SYMBOL_OK} 处理完成，共修复 {patched_files} 个文件。")
     return 0
 
 
